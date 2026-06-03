@@ -1,0 +1,6 @@
+| Couche | Rôle | Format Fichier | Transformation appliquée | Partitionnement | retention | 
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| raw | `Source vérité immutable, copie conforme source` | `CSV ` | `Aucune (juste métadonnées tech : hash MD5, ingestion_ts)` | `year=/month=/line=/` | `180j puis ILM --` |
+| staging | `Données harmonisées + typées, prêtes consommation technique` | `Parquet` | `1) Renommage snake_case (via NOMS_CIBLE)2) Typage timestamp str→datetime3) Ajout line_id (dérivé nom fichier)4) Ajout ingestion_ts5) Validation schéma (colonnes/types attendus)` | `idem` | `30-90j (régénérable depuis raw → pas besoin de garder longtemps)` |
+| curated | `Données modélisées pour usage final : détection anomalie multi-lignes` | `Parquet` | `1) Écart au setpoint par ligne (temperature - mean_per_line)2) Z-score par ligne (normalisation contextuelle)3) Table modélisée prête analyse` | `year=/month=/ (sans line car analyse cross-lignes)` | `Long terme (1-2 ans, valeur métier)` |
+| archive | `Conservation froide, compliance + replay long terme` | `Parquet+zstd ` | `Aucune (déplacement ILM depuis raw)`| `héritée raw` | `2 ans → suppression ` | 
