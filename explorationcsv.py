@@ -18,7 +18,7 @@ cartographie = {ligne: {col: '❌' for col in NOMS_CIBLE} for ligne in colonnes_
 
 for file in liste_fichiers:
     print(f"\nExploration de {file} :")
-    df = pd.read_csv(f"raw/{file}")
+    df = pd.read_csv(f"raw/production_lines/{file}")
     print(df.shape)
     print(df.dtypes)
     print(df.head(3))
