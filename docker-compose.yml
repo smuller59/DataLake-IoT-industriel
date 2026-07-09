@@ -1,14 +1,15 @@
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.10.3
+  image: apache/airflow:2.10.3-python3.11
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__FERNET_KEY: ''
-    _PIP_ADDITIONAL_REQUIREMENTS: "boto3 pandas pyarrow"
+    _PIP_ADDITIONAL_REQUIREMENTS: "boto3 pandas pyarrow openmetadata-ingestion[datalake-s3]==1.12.6"
     MINIO_ENDPOINT: http://minio:9000
     MINIO_ROOT_USER: ${MINIO_ROOT_USER}
     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    OPENMETADATA_JWT_TOKEN: ${OPENMETADATA_JWT_TOKEN}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -28,8 +29,14 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_KMS_KES_ENDPOINT: https://play.min.io:7373
+      MINIO_KMS_KES_KEY_FILE: /root-keys/root.key
+      MINIO_KMS_KES_CERT_FILE: /root-keys/root.cert
+      MINIO_KMS_KES_KEY_NAME: my-minio-sse-s3-key
     volumes:
       - minio_data:/data
+      - ./root.key:/root-keys/root.key:ro
+      - ./root.cert:/root-keys/root.cert:ro
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -40,9 +47,9 @@ services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -58,8 +65,8 @@ services:
       - |
         airflow db migrate &&
         airflow users create \
-          --username admin \
-          --password admin \
+          --username ${AIRFLOW_ADMIN_USER} \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
           --firstname admin \
           --lastname admin \
           --role Admin \
@@ -87,6 +94,119 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # ============ OpenMetadata ============
+  openmeta-postgresql:
+    container_name: openmeta-postgresql
+    image: docker.getcollate.io/openmetadata/postgresql:1.12.6
+    restart: always
+    command: "--work_mem=10MB"
+    environment:
+      POSTGRES_USER: ${OPENMETA_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${OPENMETA_POSTGRES_PASSWORD}
+    volumes:
+      - openmeta_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: psql -U postgres -tAc 'select 1' -d openmetadata_db
+      interval: 15s
+      timeout: 10s
+      retries: 10
+ 
+  openmeta-elasticsearch:
+    container_name: openmeta-elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.16.3 
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+    volumes:
+      - openmeta_es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: "curl -s http://localhost:9200/_cluster/health?pretty | grep status | grep -qE 'green|yellow' || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+ 
+  openmeta-migrate:
+    container_name: openmeta-migrate
+    image: docker.getcollate.io/openmetadata/server:1.12.6
+    command: "./bootstrap/openmetadata-ops.sh migrate"
+    environment:
+      DB_DRIVER_CLASS: org.postgresql.Driver
+      DB_SCHEME: postgresql
+      DB_PARAMS: "allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC"
+      DB_USER: ${OPENMETA_DB_USER}
+      DB_USER_PASSWORD: ${OPENMETA_DB_USER_PASSWORD}
+      DB_HOST: openmeta-postgresql
+      DB_PORT: "5432"
+      OM_DATABASE: ${OPENMETA_DATABASE}
+      ELASTICSEARCH_HOST: openmeta-elasticsearch
+      ELASTICSEARCH_PORT: "9200"
+      ELASTICSEARCH_SCHEME: http
+      SEARCH_TYPE: elasticsearch
+      MIGRATION_LIMIT_PARAM: "1200"
+    depends_on:
+      openmeta-postgresql:
+        condition: service_healthy
+      openmeta-elasticsearch:
+        condition: service_healthy
+ 
+  openmeta-server:
+    container_name: openmeta-server
+    image: docker.getcollate.io/openmetadata/server:1.12.6
+    restart: always
+    # platform: linux/amd64   # décommente si erreur "cannot execute binary file" (Mac Apple Silicon)
+    ports:
+      - "8585:8585"
+      - "8586:8586"
+    environment:
+      DB_DRIVER_CLASS: org.postgresql.Driver
+      DB_SCHEME: postgresql
+      DB_PARAMS: "allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC"
+      DB_USER: ${OPENMETA_DB_USER}
+      DB_USER_PASSWORD: ${OPENMETA_DB_USER_PASSWORD}
+      DB_HOST: openmeta-postgresql
+      DB_PORT: "5432"
+      OM_DATABASE: ${OPENMETA_DATABASE}
+      ELASTICSEARCH_HOST: openmeta-elasticsearch
+      ELASTICSEARCH_PORT: "9200"
+      ELASTICSEARCH_SCHEME: http
+      SEARCH_TYPE: elasticsearch
+      AUTHORIZER_ADMIN_PRINCIPALS: "[admin]"
+      AUTHENTICATION_PROVIDER: basic
+      FERNET_KEY: ${OPENMETA_FERNET_KEY}
+      # Pas de client Airflow externe : on désactive le pipeMINIO_KMS_KES_ENDPOINT: https://play.min.io:7373
+      MINIO_KMS_KES_KEY_FILE: /root-keys/root.key
+      MINIO_KMS_KES_CERT_FILE: /root-keys/root.cert
+      MINIO_KMS_KES_KEY_NAME: my-minio-sse-s3-keyline service
+      # pour éviter que le serveur cherche à joindre un Airflow OM inexistant
+      PIPELINE_SERVICE_CLIENT_ENABLED: "false"
+    depends_on:
+      openmeta-postgresql:
+        condition: service_healthy
+      openmeta-elasticsearch:
+        condition: service_healthy
+      openmeta-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8586/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  audit-logger:
+    image: python:3.11-slim
+    container_name: audit-logger
+    command: python3 /app/audit_webhook.py
+    volumes:
+      - ./infrastructure/minio/script_logs.py:/app/audit_webhook.py:ro
+      - ./infrastructure/minio/audit-logs:/var/log/audit
+    ports:
+      - "8090:8080"
+
+
 volumes:
   minio_data:
   postgres_data:
+  openmeta_pg_data:
+  openmeta_es_data:

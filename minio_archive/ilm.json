@@ -1,0 +1,18 @@
+{
+  "Rules": [
+    {
+      "ID": "archive-raw-180d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "production_lines/"
+      },
+      "Expiration": {
+        "Days": 730
+      },
+      "Transition": {
+        "Days": 180,
+        "StorageClass": "GLACIER"
+      }
+    }
+  ]
+}

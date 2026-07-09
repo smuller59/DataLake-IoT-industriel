@@ -12,14 +12,10 @@ s3 = boto3.client("s3", endpoint_url=os.environ.get("MINIO_ENDPOINT", "http://lo
                   aws_secret_access_key=os.environ["MINIO_ROOT_PASSWORD"],
                   config=Config(signature_version="s3v4"))
 
-key = "production_lines/year=2025/month=04/line=b/LineB_Flux.parquet"
-obj = s3.get_object(Bucket="staging", Key=key)
+key = "production_lines/year=2025/month=03/curated_multiline.parquet"
+obj = s3.get_object(Bucket="curated", Key=key)
+df = pd.read_parquet(io.BytesIO(obj["Body"].read()))
 
-# ⬇ Lit tout en mémoire dans un buffer seekable
-buf = io.BytesIO(obj["Body"].read())
-df = pd.read_parquet(buf)
-
-print(df.dtypes)
-print(df.head(3))
 print(df.columns.tolist())
-print(df["line_id"].unique())
+print(df[["line_id", "temperature", "temp_zscore", "anomaly_score", "label"]].describe())
+print(df.groupby("label")["anomaly_score"].describe())

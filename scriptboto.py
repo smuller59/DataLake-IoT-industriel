@@ -8,9 +8,9 @@ from botocore.client import Config
 
 load_dotenv()
 # === Config ===
-MINIO_ENDPOINT = "http://localhost:9000"
-ACCESS_KEY =os.getenv("MINIO_ROOT_USER")  # ⚠ à charger depuis .env idéalement
-SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD")   # ⚠ à charger depuis .env idéalement
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
+ACCESS_KEY = os.getenv("MINIO_ROOT_USER")
+SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD")
 BUCKET = "raw"
 LOCAL_DATA_DIR = Path("./raw/production_lines/")    # adapter au chemin réel
 
