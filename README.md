@@ -8,7 +8,7 @@ Le pipeline suit une architecture en couches (medallion), documentée en détail
 
 | Couche | Rôle | Format | Partitionnement | Rétention |
 | :--- | :--- | :--- | :--- | :--- |
-| **raw** | Source de vérité immuable, copie conforme des CSV producteurs (hash MD5 + `ingestion_ts`) | CSV | `year=/month=/line=/` | 180j puis ILM → GLACIER |
+| **raw** | Source de vérité immuable, copie conforme des CSV producteurs (hash MD5 + `ingestion_ts`) | CSV | `year=/month=/line=/` | Expiration à 730j (transition froide non implémentée, cf. [`gouvernance.md`](gouvernance.md) §8) |
 | **staging** | Données harmonisées (snake_case), typées, schéma validé | Parquet | `year=/month=/line=/` | 30-90j (régénérable depuis raw) |
 | **curated** | Table modélisée pour la détection d'anomalies multi-lignes (z-score par ligne) | Parquet | `year=/month=/` (cross-lignes) | 1-2 ans |
 | **archive** | Conservation froide, compliance | Parquet+zstd | héritée de raw | 2 ans → suppression |
@@ -77,16 +77,19 @@ Le pipeline suit une architecture en couches (medallion), documentée en détail
 ## Structure du projet
 
 ```
-dags/                      DAGs Airflow (ingestion, transformation, curation, catalogue)
-data/, raw/                Jeux de données CSV d'exemple (5 lignes de production)
-infrastructure/minio/      Policies IAM MinIO, webhook d'audit
-minio_archive/             Règle de cycle de vie (ILM) MinIO
-minio_client/              Script d'exemple client `mc`
-scriptboto.py              Upload manuel raw/ (hors Airflow)
-teststaging.py             Vérification manuelle d'un fichier staging/
-verif_curated.py           Vérification manuelle d'un fichier curated/
-archi_couche.md            Détail des couches du data lake
-explore.md                 Référentiel d'harmonisation des colonnes source → staging
+dags/                                  DAGs Airflow (ingestion, transformation, curation, catalogue)
+data/, raw/                            Jeux de données CSV d'exemple (5 lignes de production)
+infrastructure/minio/policies/         Policies IAM MinIO (analyst-policy.json, engineer-policy.json)
+infrastructure/minio/script_logs.py    Webhook récepteur des logs d'audit (conteneur audit-logger)
+infrastructure/minio/audit-logs/       Logs d'audit générés (non versionné)
+minio_archive/ilm.json                 Règle de cycle de vie (ILM) MinIO — cf. section Gouvernance
+minio_client/                          Script d'exemple client `mc`
+scriptboto.py                          Upload manuel raw/ (hors Airflow)
+teststaging.py                         Vérification manuelle d'un fichier staging/
+verif_curated.py                       Vérification manuelle d'un fichier curated/
+archi_couche.md                        Détail des couches du data lake
+explore.md                             Référentiel d'harmonisation des colonnes source → staging
+gouvernance.md                         Politique de gouvernance : rôles, accès, cycle de vie, responsabilités
 ```
 
 ## Sécurité
@@ -94,3 +97,30 @@ explore.md                 Référentiel d'harmonisation des colonnes source →
 - Aucun credential n'est en dur dans le code ou `docker-compose.yml` : tout passe par `.env` (non versionné).
 - `root.cert` / `root.key` (clés KES) et les logs d'audit sont exclus du dépôt via `.gitignore`.
 - Le token du bot d'ingestion OpenMetadata doit être régénéré via l'UI (`Settings > Bots > ingestion-bot`) après chaque nouveau déploiement — ne jamais le commiter.
+
+## Gouvernance et accès
+
+Politique complète : voir [`gouvernance.md`](gouvernance.md).
+
+### Comptes de service (IAM MinIO)
+
+| Compte | Rôle | Accès |
+| :--- | :--- | :--- |
+| `analyst-prod` | data-analyst | Lecture seule `curated/` |
+| `engineer-prod` | data-engineer | Lecture/écriture `raw/` + `staging/` |
+| `admin-prod` | admin | Tous droits (policy `consoleAdmin`) |
+
+Policies définies dans `infrastructure/minio/policies/*.json`. Aucun rôle applicatif n'a d'accès direct à `archive/` (couche gérée uniquement par les règles ILM et par un accès admin en cas d'audit/replay).
+
+### Chiffrement au repos
+
+SSE-S3 activé sur `raw/` via KES connecté au sandbox public MinIO (`play.min.io:7373`).
+**Limitation assumée** : sandbox de test uniquement, non adapté à un déploiement en production (clés accessibles publiquement) — cf. `gouvernance.md` §8.
+
+### Cycle de vie (ILM)
+
+La règle définie dans `minio_archive/ilm.json` prévoit une expiration à 730 jours et une transition vers `GLACIER` à 180 jours. **Seule l'expiration à 730j est réellement active** : la transition froide nécessite un tier de stockage distant (`mc admin tier add`), absent de cette infrastructure mono-nœud de formation (cf. `gouvernance.md` §5 et §8).
+
+### Audit
+
+Chaque requête S3 est journalisée via un webhook custom (`infrastructure/minio/script_logs.py`, conteneur `audit-logger`) vers `infrastructure/minio/audit-logs/minio-audit.log` (horodatage, compte à l'origine, action, statut).
